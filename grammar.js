@@ -1,8 +1,12 @@
 /// <reference types="tree-sitter-cli/dsl" />
 
-// Norq tree-sitter grammar.
-// Strategy: be permissive with Markdown (treat as text), be precise with
-// Norq-specific syntax (expressions, directives, frontmatter).
+// Norq tree-sitter grammar — v3 (safe + correct)
+//
+// Strategy: line-oriented. Each line is a single token or a sequence of
+// tokens that starts with an unambiguous prefix. Directives use a single
+// token for ":::keyword" so the lexer can resolve them without backtracking.
+// Inline content only parses expressions (unambiguous `{{...}}`).
+// Markdown formatting is left as text.
 
 module.exports = grammar({
   name: "norq",
@@ -14,45 +18,37 @@ module.exports = grammar({
 
     _line: ($) =>
       choice(
-        $.frontmatter_delimiter,
         $.directive_if_line,
         $.directive_each_line,
         $.directive_else_line,
-        $.directive_end_line,
         $.directive_named_line,
+        $.directive_end_line,
+        $.frontmatter_delimiter,
         $.heading_line,
-        $.blockquote_line,
-        $.list_line,
-        $.horizontal_rule,
         $.code_fence,
+        $.horizontal_rule,
         $.blank_line,
         $.content_line
       ),
 
     // ---------------------------------------------------------------
-    // Frontmatter delimiters
+    // Frontmatter
     // ---------------------------------------------------------------
-    frontmatter_delimiter: (_) => /---[ \t]*\n/,
+    frontmatter_delimiter: (_) => token(prec(5, /---[ \t]*\n/)),
 
     // ---------------------------------------------------------------
-    // Directives
+    // Directives — each prefix is a single high-priority token
     // ---------------------------------------------------------------
     directive_if_line: ($) =>
       seq(
-        alias(/:::/, $.directive_marker),
-        /[ \t]+/,
-        alias("if", $.keyword_if),
-        /[ \t]+/,
+        alias(token(prec(10, /:::[ \t]+if[ \t]+/)), $.directive_if_prefix),
         $.condition_expr,
         /\n/
       ),
 
     directive_each_line: ($) =>
       seq(
-        alias(/:::/, $.directive_marker),
-        /[ \t]+/,
-        alias("each", $.keyword_each),
-        /[ \t]+/,
+        alias(token(prec(10, /:::[ \t]+each[ \t]+/)), $.directive_each_prefix),
         field("collection", $.path),
         optional(seq(
           /[ \t]+/,
@@ -63,23 +59,31 @@ module.exports = grammar({
         /\n/
       ),
 
-    directive_else_line: (_) => /:::else[ \t]*\n/,
-    directive_end_line: (_) => /:::[ \t]*\n/,
+    directive_else_line: (_) => token(prec(10, /:::else[ \t]*\n/)),
 
     directive_named_line: ($) =>
       seq(
-        alias(/:::/, $.directive_marker),
-        /[ \t]+/,
-        field("name", $.directive_name),
+        field("name", $.directive_name_token),
         optional(seq(/[ \t]+/, field("params", $.directive_params))),
         /\n/
       ),
 
-    directive_name: (_) =>
-      token(choice(
-        "header", "footer", "action", "callout", "highlight",
-        "hero", "fields", "fieldset", "centered", "columns", "raw"
-      )),
+    directive_name_token: (_) =>
+      token(prec(10, choice(
+        /:::[ \t]+header/,
+        /:::[ \t]+footer/,
+        /:::[ \t]+action/,
+        /:::[ \t]+callout/,
+        /:::[ \t]+highlight/,
+        /:::[ \t]+hero/,
+        /:::[ \t]+fields/,
+        /:::[ \t]+fieldset/,
+        /:::[ \t]+centered/,
+        /:::[ \t]+columns/,
+        /:::[ \t]+raw/
+      ))),
+
+    directive_end_line: (_) => token(prec(10, /:::[ \t]*\n/)),
 
     directive_params: (_) => /[^\n]+/,
 
@@ -107,7 +111,7 @@ module.exports = grammar({
     boolean_literal: (_) => token(choice("true", "false")),
 
     // ---------------------------------------------------------------
-    // Markdown block-level
+    // Block-level Markdown
     // ---------------------------------------------------------------
     heading_line: ($) =>
       seq(
@@ -117,53 +121,29 @@ module.exports = grammar({
         /\n/
       ),
 
-    heading_marker: (_) => /#{1,6}/,
+    heading_marker: (_) => token(prec(5, /#{1,6}/)),
     heading_text: (_) => /[^\n{]+/,
 
-    blockquote_line: ($) =>
-      seq(
-        alias(">", $.blockquote_marker),
-        /[ \t]*/,
-        repeat(choice($.expression, $.raw_expression, /[^\n{]+/)),
-        /\n/
-      ),
-
-    list_line: ($) =>
-      seq(
-        /[ \t]*/,
-        $.list_marker,
-        /[ \t]+/,
-        repeat(choice($.expression, $.raw_expression, /[^\n{]+/)),
-        /\n/
-      ),
-
-    list_marker: (_) => token(choice(/[*+-]/, /\d+\./)),
-
-    horizontal_rule: (_) => /(-{3,}|\*{3,}|_{3,})[ \t]*\n/,
-    code_fence: (_) => /```[^\n]*\n/,
+    code_fence: (_) => token(prec(5, /```[^\n]*\n/)),
+    horizontal_rule: (_) => token(prec(5, /(-{3,}|\*{3,}|_{3,})[ \t]*\n/)),
     blank_line: (_) => /[ \t]*\n/,
 
     // ---------------------------------------------------------------
-    // Content line (paragraphs, anything else)
+    // Content line — expressions + text
     // ---------------------------------------------------------------
     content_line: ($) =>
       seq(
         repeat1(choice(
           $.expression,
           $.raw_expression,
-          $.bold,
-          $.italic_underscore,
-          $.strikethrough,
-          $.code_span,
-          $.link_with_attrs,
-          $.image_with_attrs,
-          $.link,
-          $.image,
-          $.emoji,
-          $.text_segment
+          $.text_chunk
         )),
         /\n/
       ),
+
+    // Greedily consume non-expression, non-newline text.
+    // Lone `{` is included as text (only `{{` starts an expression).
+    text_chunk: (_) => /([^\n{]|\{[^\n{])+/,
 
     // ---------------------------------------------------------------
     // Expressions
@@ -218,76 +198,6 @@ module.exports = grammar({
 
     _pipe_arg: ($) =>
       seq(/[ \t]+/, choice($.string_literal, $.number_literal, $.path)),
-
-    // ---------------------------------------------------------------
-    // Inline elements
-    // ---------------------------------------------------------------
-    bold: ($) =>
-      seq(
-        alias("**", $.emphasis_marker),
-        repeat1(choice($.expression, $.raw_expression, $.bold_text)),
-        alias("**", $.emphasis_marker)
-      ),
-
-    bold_text: (_) => /[^*{\n]+/,
-
-    italic_underscore: ($) =>
-      seq(
-        alias("_", $.emphasis_marker),
-        repeat1(choice($.expression, $.raw_expression, $.italic_text)),
-        alias("_", $.emphasis_marker)
-      ),
-
-    italic_text: (_) => /[^_{\n]+/,
-
-    strikethrough: ($) =>
-      seq(
-        alias("~~", $.emphasis_marker),
-        repeat1(choice($.expression, $.raw_expression, $.strikethrough_text)),
-        alias("~~", $.emphasis_marker)
-      ),
-
-    strikethrough_text: (_) => /[^~{\n]+/,
-
-    code_span: (_) => /`[^`\n]+`/,
-
-    link_with_attrs: ($) =>
-      prec(2, seq(
-        "[", $.link_text_content, "]",
-        "(", $.link_url_content, ")",
-        "{", $.attr_content, "}"
-      )),
-
-    image_with_attrs: ($) =>
-      prec(2, seq(
-        "!", "[", $.link_text_content, "]",
-        "(", $.link_url_content, ")",
-        "{", $.attr_content, "}"
-      )),
-
-    link: ($) =>
-      prec(1, seq(
-        "[", $.link_text_content, "]",
-        "(", $.link_url_content, ")"
-      )),
-
-    image: ($) =>
-      prec(1, seq(
-        "!", "[", $.link_text_content, "]",
-        "(", $.link_url_content, ")"
-      )),
-
-    link_text_content: ($) =>
-      repeat1(choice($.expression, /[^\]{\n]+/)),
-
-    link_url_content: ($) =>
-      repeat1(choice($.expression, /[^){\n]+/)),
-
-    attr_content: (_) => /[^}\n]+/,
-
-    emoji: (_) => /:[a-zA-Z0-9_+-]+:/,
-
-    text_segment: (_) => /[^\n*_~`\[!:{]+|[*_~`\[!:{]/,
 
     // ---------------------------------------------------------------
     // Shared
