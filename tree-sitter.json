@@ -1,0 +1,21 @@
+{
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for Norq notification templates",
+    "authors": [{ "name": "SuprSend" }],
+    "links": {
+      "repository": "https://github.com/suprsend/norq"
+    }
+  },
+  "grammars": [
+    {
+      "name": "norq",
+      "camelcase": "Norq",
+      "scope": "text.norq",
+      "path": ".",
+      "file-types": ["md"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}
